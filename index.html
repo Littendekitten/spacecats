@@ -1,1 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Space Cats Multiplayer</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
 
+  <!-- Game Canvas -->
+  <canvas id="gameCanvas"></canvas>
+
+  <!-- Login Overlay -->
+  <div id="loginScreen" class="overlay">
+    <div class="card">
+      <div class="logo-cat">🐱🚀</div>
+      <h1>SPACE CATS</h1>
+      <p class="subtitle">Multiplayer Arena</p>
+      
+      <div class="input-group">
+        <label for="usernameInput">Cat Call Sign (Name)</label>
+        <input type="text" id="usernameInput" placeholder="Captain Purrfect..." maxlength="15" />
+      </div>
+      
+      <button id="startGameBtn" class="btn primary-btn">Launch Ship</button>
+      <button id="viewRulesBtn" class="btn secondary-btn">Firebase Rules & Setup</button>
+    </div>
+  </div>
+
+  <!-- HUD Header Overlay -->
+  <div id="hud" class="hud-overlay hidden">
+    <div class="hud-stat">
+      <span class="hud-label">Pilot:</span>
+      <span id="hudName" class="hud-val">---</span>
+    </div>
+    <div class="hud-stat">
+      <span class="hud-label">Health:</span>
+      <div class="health-bar-container">
+        <div id="healthBar" class="health-bar-fill"></div>
+      </div>
+    </div>
+    <div class="hud-stat">
+      <span class="hud-label">Coins:</span>
+      <span id="hudCoins" class="hud-val gold">0 🪙</span>
+    </div>
+    <div class="hud-stat">
+      <span class="hud-label">K / D:</span>
+      <span id="hudKD" class="hud-val">0 / 0</span>
+    </div>
+
+    <div class="hud-actions">
+      <button id="shopBtn" class="btn hud-btn">🛸 Armory Shop</button>
+      <button id="rulesBtn" class="btn hud-btn">⚙️ Firebase Rules</button>
+    </div>
+  </div>
+
+  <!-- Shop Modal -->
+  <div id="shopModal" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>🛸 Space Cat Armory & Skins</h2>
+        <button id="closeShopBtn" class="close-btn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <h3>Unlocked Skins</h3>
+        <div class="skins-grid">
+          <div class="skin-card active" data-skin="default">
+            <div class="skin-preview" style="background: #00ffcc;">🐱</div>
+            <h4>Tabby Pilot</h4>
+            <p>Standard issue</p>
+            <button class="btn select-skin-btn" data-skin="default">Equipped</button>
+          </div>
+          <div class="skin-card" data-skin="cyber">
+            <div class="skin-preview" style="background: #ff007f;">😸</div>
+            <h4>Cyber Purr</h4>
+            <p>Cost: 50 Coins</p>
+            <button class="btn buy-skin-btn" data-skin="cyber" data-cost="50">Unlock (50 🪙)</button>
+          </div>
+          <div class="skin-card" data-skin="void">
+            <div class="skin-preview" style="background: #7928ca;">🙀</div>
+            <h4>Void Panther</h4>
+            <p>Cost: 150 Coins</p>
+            <button class="btn buy-skin-btn" data-skin="void" data-cost="150">Unlock (150 🪙)</button>
+          </div>
+          <div class="skin-card" data-skin="nyan">
+            <div class="skin-preview" style="background: #ffeb3b;">😻</div>
+            <h4>Golden Nyan</h4>
+            <p>Cost: 300 Coins</p>
+            <button class="btn buy-skin-btn" data-skin="nyan" data-cost="300">Unlock (300 🪙)</button>
+          </div>
+        </div>
+
+        <h3>Ship Upgrades</h3>
+        <div class="upgrades-list">
+          <div class="upgrade-row">
+            <div>
+              <strong>Laser Power</strong>
+              <p>Increase laser speed & diameter</p>
+            </div>
+            <button id="buyLaserUpgrade" class="btn upgrade-btn">Upgrade (+1 Damage) - 40 🪙</button>
+          </div>
+          <div class="upgrade-row">
+            <div>
+              <strong>Engine Thrusters</strong>
+              <p>Increase movement speed</p>
+            </div>
+            <button id="buySpeedUpgrade" class="btn upgrade-btn">Upgrade (+1 Speed) - 40 🪙</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Firebase Rules Modal -->
+  <div id="rulesModal" class="modal hidden">
+    <div class="modal-content large">
+      <div class="modal-header">
+        <h2>🔥 Firebase Security Rules</h2>
+        <button id="closeRulesBtn" class="close-btn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p>Copy and paste these rules into your Firebase Console so your Realtime Database and Firestore function properly without permission errors.</p>
+        
+        <div class="tab-buttons">
+          <button id="rtdbTabBtn" class="tab-btn active">Realtime Database Rules</button>
+          <button id="firestoreTabBtn" class="tab-btn">Firestore Rules</button>
+        </div>
+
+        <!-- Realtime Database Rules -->
+        <div id="rtdbRulesContent" class="tab-content">
+          <p><strong>Location in Console:</strong> Realtime Database &rarr; Rules tab</p>
+          <pre><code>{
+  "rules": {
+    "players": {
+      ".read": true,
+      ".write": true
+    },
+    "projectiles": {
+      ".read": true,
+      ".write": true
+    },
+    "coins": {
+      ".read": true,
+      ".write": true
+    }
+  }
+}</code></pre>
+        </div>
+
+        <!-- Firestore Rules -->
+        <div id="firestoreRulesContent" class="tab-content hidden">
+          <p><strong>Location in Console:</strong> Firestore Database &rarr; Rules tab</p>
+          <pre><code>rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{userId} {
+      allow read, write: if true;
+    }
+  }
+}</code></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- App Entry Script -->
+  <script type="module" src="app.js"></script>
+</body>
+</html>
