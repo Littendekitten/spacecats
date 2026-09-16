@@ -1,6 +1,6 @@
 // Import Firebase SDKs directly from CDN for GitHub Pages
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
-import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
 import { getFirestore, doc, getDoc, setDoc, updateDoc, increment, onSnapshot } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
 import { getDatabase, ref, set, update, onValue, onChildAdded, onChildRemoved, remove, onDisconnect } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
 
@@ -60,6 +60,9 @@ function playSound(type) {
 
 // App State
 let currentUser = null;
+let unsubscribeFirestore = null;
+let gameLoopId = null;
+
 let userData = {
   name: "SpaceCat",
   coins: 0,
@@ -84,7 +87,6 @@ const playerState = {
 };
 
 const otherPlayers = {};
-const localProjectiles = [];
 const remoteProjectiles = {};
 const spaceCoins = {};
 
@@ -115,21 +117,44 @@ const loginScreen = document.getElementById("loginScreen");
 const hud = document.getElementById("hud");
 const usernameInput = document.getElementById("usernameInput");
 const startGameBtn = document.getElementById("startGameBtn");
+const googleLoginBtn = document.getElementById("googleLoginBtn");
+const userInfoBox = document.getElementById("userInfo");
+const userDisplayName = document.getElementById("userDisplayName");
+const logoutBtn = document.getElementById("logoutBtn");
+
 const shopModal = document.getElementById("shopModal");
 const shopBtn = document.getElementById("shopBtn");
 const closeShopBtn = document.getElementById("closeShopBtn");
-const rulesModal = document.getElementById("rulesModal");
-const rulesBtn = document.getElementById("rulesBtn");
-const viewRulesBtn = document.getElementById("viewRulesBtn");
-const closeRulesBtn = document.getElementById("closeRulesBtn");
 
-// Auto Login & Firebase Setup
-signInAnonymously(auth).catch(console.error);
+// Google Auth Handlers
+const googleProvider = new GoogleAuthProvider();
 
+googleLoginBtn.addEventListener("click", async () => {
+  try {
+    await signInWithPopup(auth, googleProvider);
+  } catch (err) {
+    console.error("Google Sign In Error:", err);
+    alert("Google login failed: " + err.message);
+  }
+});
+
+logoutBtn.addEventListener("click", async () => {
+  if (playerState.id) {
+    await remove(ref(rtdb, `players/${playerState.id}`));
+  }
+  await signOut(auth);
+});
+
+// Auth Persistence Listener (Auto-login)
 onAuthStateChanged(auth, async (user) => {
   if (user) {
     currentUser = user;
     playerState.id = user.uid;
+
+    userDisplayName.innerText = user.displayName || user.email;
+    userInfoBox.classList.remove("hidden");
+    googleLoginBtn.classList.add("hidden");
+    startGameBtn.classList.remove("hidden");
 
     // Load Firestore User Data
     const userRef = doc(db, "users", user.uid);
@@ -138,21 +163,38 @@ onAuthStateChanged(auth, async (user) => {
     if (snap.exists()) {
       userData = { ...userData, ...snap.data() };
     } else {
+      userData.name = user.displayName || "SpaceCat";
       await setDoc(userRef, userData);
     }
 
-    // Subscribe to Firestore Changes
-    onSnapshot(userRef, (docSnap) => {
+    usernameInput.value = userData.name;
+
+    // Realtime Firestore Listener
+    if (unsubscribeFirestore) unsubscribeFirestore();
+    unsubscribeFirestore = onSnapshot(userRef, (docSnap) => {
       if (docSnap.exists()) {
         userData = { ...userData, ...docSnap.data() };
         updateHUD();
         updateShopUI();
       }
     });
+
+  } else {
+    // Logged Out Reset State
+    currentUser = null;
+    playerState.id = null;
+
+    userInfoBox.classList.add("hidden");
+    googleLoginBtn.classList.remove("hidden");
+    startGameBtn.classList.add("hidden");
+    loginScreen.classList.remove("hidden");
+    hud.classList.add("hidden");
+
+    if (unsubscribeFirestore) unsubscribeFirestore();
   }
 });
 
-// Start Game Entry
+// Start Game
 startGameBtn.addEventListener("click", () => {
   const nameVal = usernameInput.value.trim();
   if (nameVal) userData.name = nameVal;
@@ -182,7 +224,6 @@ function initMultiplayer() {
         otherPlayers[id] = data[id];
       }
     });
-    // Remove disconnected
     Object.keys(otherPlayers).forEach((id) => {
       if (!data[id]) delete otherPlayers[id];
     });
@@ -205,20 +246,18 @@ function initMultiplayer() {
   onValue(ref(rtdb, "coins"), (snapshot) => {
     const data = snapshot.val() || {};
     Object.assign(spaceCoins, data);
-    // Remove collected coins local cache
     Object.keys(spaceCoins).forEach((id) => {
       if (!data[id]) delete spaceCoins[id];
     });
   });
 
-  // Spawn initial coins if room empty
   spawnCoinsIfNeeded();
 
-  // Trigger Shooting on Click
+  window.removeEventListener("mousedown", fireLaser);
   window.addEventListener("mousedown", fireLaser);
 
-  // Core Game Loop
-  requestAnimationFrame(gameLoop);
+  if (gameLoopId) cancelAnimationFrame(gameLoopId);
+  gameLoopId = requestAnimationFrame(gameLoop);
 }
 
 function spawnCoinsIfNeeded() {
@@ -238,7 +277,6 @@ function spawnCoinsIfNeeded() {
 // Fire Laser
 function fireLaser() {
   if (loginScreen.classList.contains("hidden") && shopModal.classList.contains("hidden")) {
-    const pRef = ref(rtdb, "projectiles");
     const projId = playerState.id + "_" + Date.now();
     const speed = 14;
 
@@ -255,7 +293,6 @@ function fireLaser() {
     set(ref(rtdb, `projectiles/${projId}`), projData);
     playSound("laser");
 
-    // Remove laser after 2 seconds
     setTimeout(() => {
       remove(ref(rtdb, `projectiles/${projId}`));
     }, 2000);
@@ -268,12 +305,13 @@ function gameLoop(now) {
   const dt = (now - lastTime) / 1000;
   lastTime = now;
 
-  updateLocalPlayer();
-  updateProjectiles();
-  checkCoinCollisions();
-  render();
-
-  requestAnimationFrame(gameLoop);
+  if (currentUser) {
+    updateLocalPlayer();
+    updateProjectiles();
+    checkCoinCollisions();
+    render();
+    gameLoopId = requestAnimationFrame(gameLoop);
+  }
 }
 
 function updateLocalPlayer() {
@@ -284,12 +322,10 @@ function updateLocalPlayer() {
   if (keys["a"] || keys["arrowleft"]) playerState.x -= speed;
   if (keys["d"] || keys["arrowright"]) playerState.x += speed;
 
-  // Rotation towards mouse
   const screenCenterX = canvas.width / 2;
   const screenCenterY = canvas.height / 2;
   playerState.angle = Math.atan2(mouse.y - screenCenterY, mouse.x - screenCenterX);
 
-  // Sync to Realtime Database
   if (playerState.id) {
     update(ref(rtdb, `players/${playerState.id}`), {
       x: playerState.x,
@@ -303,7 +339,6 @@ function updateLocalPlayer() {
 }
 
 function updateProjectiles() {
-  // Check remote projectiles hitting local player
   Object.keys(remoteProjectiles).forEach((id) => {
     const p = remoteProjectiles[id];
     p.x += p.vx;
@@ -317,7 +352,6 @@ function updateProjectiles() {
       delete remoteProjectiles[id];
 
       if (playerState.health <= 0) {
-        // Player died
         userData.deaths++;
         updateDoc(doc(db, "users", currentUser.uid), { deaths: increment(1) });
         playerState.health = 100;
@@ -347,11 +381,9 @@ function checkCoinCollisions() {
 function render() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  // Camera Follow Player
   ctx.save();
   ctx.translate(canvas.width / 2 - playerState.x, canvas.height / 2 - playerState.y);
 
-  // Draw Space Grid Background
   drawGrid();
 
   // Draw Coins
@@ -415,7 +447,7 @@ function drawSpaceCat(x, y, angle, skin, name, health) {
   ctx.save();
   ctx.translate(x, y);
 
-  // Draw Player Name & Health Bar
+  // Player Name & Health Bar
   ctx.font = "12px sans-serif";
   ctx.fillStyle = "#ffffff";
   ctx.textAlign = "center";
@@ -428,7 +460,6 @@ function drawSpaceCat(x, y, angle, skin, name, health) {
 
   ctx.rotate(angle);
 
-  // Cat Skin Color Map
   const colors = {
     default: "#00ffcc",
     cyber: "#ff007f",
@@ -449,7 +480,7 @@ function drawSpaceCat(x, y, angle, skin, name, health) {
   ctx.shadowBlur = 10;
   ctx.fill();
 
-  // Cat Ears on Ship
+  // Cat Ears
   ctx.beginPath();
   ctx.moveTo(5, -10);
   ctx.lineTo(12, -18);
@@ -476,7 +507,6 @@ function updateHUD() {
 }
 
 function updateShopUI() {
-  // Update Buttons state for Skins
   document.querySelectorAll(".buy-skin-btn").forEach((btn) => {
     const skinKey = btn.getAttribute("data-skin");
     const cost = parseInt(btn.getAttribute("data-cost"));
@@ -544,32 +574,4 @@ document.getElementById("buySpeedUpgrade").addEventListener("click", async () =>
       speedLevel: userData.speedLevel
     });
   }
-});
-
-// Rules Modal Handlers
-const openRules = () => rulesModal.classList.remove("hidden");
-const closeRules = () => rulesModal.classList.add("hidden");
-
-rulesBtn.addEventListener("click", openRules);
-viewRulesBtn.addEventListener("click", openRules);
-closeRulesBtn.addEventListener("click", closeRules);
-
-// Rules Tab Switcher
-const rtdbTabBtn = document.getElementById("rtdbTabBtn");
-const firestoreTabBtn = document.getElementById("firestoreTabBtn");
-const rtdbRulesContent = document.getElementById("rtdbRulesContent");
-const firestoreRulesContent = document.getElementById("firestoreRulesContent");
-
-rtdbTabBtn.addEventListener("click", () => {
-  rtdbTabBtn.classList.add("active");
-  firestoreTabBtn.classList.remove("active");
-  rtdbRulesContent.classList.remove("hidden");
-  firestoreRulesContent.classList.add("hidden");
-});
-
-firestoreTabBtn.addEventListener("click", () => {
-  firestoreTabBtn.classList.add("active");
-  rtdbTabBtn.classList.remove("active");
-  firestoreRulesContent.classList.remove("hidden");
-  rtdbRulesContent.classList.add("hidden");
 });
