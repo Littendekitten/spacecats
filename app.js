@@ -82,12 +82,11 @@ const playerState = {
   angle: 0,
   health: 100,
   maxHealth: 100,
-  speed: 5,
-  laserDamage: 10
+  speed: 5
 };
 
 const otherPlayers = {};
-const remoteProjectiles = {};
+const projectiles = {}; // Stores all active lasers
 const spaceCoins = {};
 
 // Canvas Setup
@@ -105,8 +104,15 @@ resizeCanvas();
 const keys = {};
 const mouse = { x: 0, y: 0 };
 
-window.addEventListener("keydown", (e) => (keys[e.key.toLowerCase()] = true));
+window.addEventListener("keydown", (e) => {
+  keys[e.key.toLowerCase()] = true;
+  if (e.code === "Space") {
+    fireLaser();
+  }
+});
+
 window.addEventListener("keyup", (e) => (keys[e.key.toLowerCase()] = false));
+
 window.addEventListener("mousemove", (e) => {
   mouse.x = e.clientX;
   mouse.y = e.clientY;
@@ -180,7 +186,6 @@ onAuthStateChanged(auth, async (user) => {
     });
 
   } else {
-    // Logged Out Reset State
     currentUser = null;
     playerState.id = null;
 
@@ -229,17 +234,19 @@ function initMultiplayer() {
     });
   });
 
-  // Listen for Remote Shots
+  // Listen for ALL Shots in Room (Both Local and Remote)
   onChildAdded(ref(rtdb, "projectiles"), (snapshot) => {
     const proj = snapshot.val();
-    if (proj && proj.ownerId !== playerState.id) {
-      remoteProjectiles[snapshot.key] = proj;
-      playSound("laser");
+    if (proj) {
+      projectiles[snapshot.key] = proj;
+      if (proj.ownerId !== playerState.id) {
+        playSound("laser");
+      }
     }
   });
 
   onChildRemoved(ref(rtdb, "projectiles"), (snapshot) => {
-    delete remoteProjectiles[snapshot.key];
+    delete projectiles[snapshot.key];
   });
 
   // Coins Sync
@@ -253,11 +260,18 @@ function initMultiplayer() {
 
   spawnCoinsIfNeeded();
 
-  window.removeEventListener("mousedown", fireLaser);
-  window.addEventListener("mousedown", fireLaser);
+  window.removeEventListener("mousedown", handleMouseDown);
+  window.addEventListener("mousedown", handleMouseDown);
 
   if (gameLoopId) cancelAnimationFrame(gameLoopId);
   gameLoopId = requestAnimationFrame(gameLoop);
+}
+
+function handleMouseDown(e) {
+  // Prevent shooting when clicking UI buttons or inside active modals
+  if (e.target && e.target.tagName === "BUTTON") return;
+  if (!loginScreen.classList.contains("hidden") || !shopModal.classList.contains("hidden")) return;
+  fireLaser();
 }
 
 function spawnCoinsIfNeeded() {
@@ -274,44 +288,46 @@ function spawnCoinsIfNeeded() {
   }, { onlyOnce: true });
 }
 
-// Fire Laser
+// Fire Laser Action
 function fireLaser() {
-  if (loginScreen.classList.contains("hidden") && shopModal.classList.contains("hidden")) {
-    const projId = playerState.id + "_" + Date.now();
-    const speed = 14;
+  if (!currentUser || !playerState.id) return;
 
-    const projData = {
-      id: projId,
-      ownerId: playerState.id,
-      x: playerState.x + Math.cos(playerState.angle) * 20,
-      y: playerState.y + Math.sin(playerState.angle) * 20,
-      vx: Math.cos(playerState.angle) * speed,
-      vy: Math.sin(playerState.angle) * speed,
-      damage: 10 + (userData.laserLevel - 1) * 5
-    };
+  const projId = playerState.id + "_" + Date.now() + "_" + Math.floor(Math.random() * 1000);
+  const speed = 15;
 
-    set(ref(rtdb, `projectiles/${projId}`), projData);
-    playSound("laser");
+  const projData = {
+    id: projId,
+    ownerId: playerState.id,
+    x: playerState.x + Math.cos(playerState.angle) * 25,
+    y: playerState.y + Math.sin(playerState.angle) * 25,
+    vx: Math.cos(playerState.angle) * speed,
+    vy: Math.sin(playerState.angle) * speed,
+    damage: 10 + (userData.laserLevel - 1) * 5
+  };
 
-    setTimeout(() => {
-      remove(ref(rtdb, `projectiles/${projId}`));
-    }, 2000);
-  }
+  set(ref(rtdb, `projectiles/${projId}`), projData);
+  playSound("laser");
+
+  // Remove laser after 2.5 seconds
+  setTimeout(() => {
+    remove(ref(rtdb, `projectiles/${projId}`));
+  }, 2500);
 }
 
-// Game Loop
+// Main Engine Game Loop
 let lastTime = performance.now();
 function gameLoop(now) {
   const dt = (now - lastTime) / 1000;
   lastTime = now;
 
-  if (currentUser) {
+  if (currentUser && loginScreen.classList.contains("hidden")) {
     updateLocalPlayer();
     updateProjectiles();
     checkCoinCollisions();
     render();
-    gameLoopId = requestAnimationFrame(gameLoop);
   }
+  
+  gameLoopId = requestAnimationFrame(gameLoop);
 }
 
 function updateLocalPlayer() {
@@ -339,24 +355,29 @@ function updateLocalPlayer() {
 }
 
 function updateProjectiles() {
-  Object.keys(remoteProjectiles).forEach((id) => {
-    const p = remoteProjectiles[id];
+  Object.keys(projectiles).forEach((id) => {
+    const p = projectiles[id];
     p.x += p.vx;
     p.y += p.vy;
 
-    const dist = Math.hypot(p.x - playerState.x, p.y - playerState.y);
-    if (dist < 22) {
-      playerState.health -= p.damage;
-      playSound("hit");
-      remove(ref(rtdb, `projectiles/${id}`));
-      delete remoteProjectiles[id];
+    // Hit Detection for enemy lasers against Local Player
+    if (p.ownerId !== playerState.id) {
+      const dist = Math.hypot(p.x - playerState.x, p.y - playerState.y);
+      if (dist < 22) {
+        playerState.health -= p.damage;
+        playSound("hit");
+        
+        remove(ref(rtdb, `projectiles/${id}`));
+        delete projectiles[id];
 
-      if (playerState.health <= 0) {
-        userData.deaths++;
-        updateDoc(doc(db, "users", currentUser.uid), { deaths: increment(1) });
-        playerState.health = 100;
-        playerState.x = Math.random() * 1000;
-        playerState.y = Math.random() * 1000;
+        if (playerState.health <= 0) {
+          userData.deaths++;
+          updateDoc(doc(db, "users", currentUser.uid), { deaths: increment(1) });
+          
+          playerState.health = 100;
+          playerState.x = Math.random() * 1000;
+          playerState.y = Math.random() * 1000;
+        }
       }
     }
   });
@@ -377,7 +398,7 @@ function checkCoinCollisions() {
   });
 }
 
-// Render Function
+// Canvas Render
 function render() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -397,13 +418,14 @@ function render() {
     ctx.shadowBlur = 0;
   });
 
-  // Draw Remote Projectiles
-  Object.values(remoteProjectiles).forEach((p) => {
+  // Draw All Projectiles (Your Lasers = Neon Cyan, Enemy Lasers = Pink)
+  Object.values(projectiles).forEach((p) => {
+    const isMine = p.ownerId === playerState.id;
     ctx.beginPath();
-    ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
-    ctx.fillStyle = "#ff007f";
-    ctx.shadowColor = "#ff007f";
-    ctx.shadowBlur = 8;
+    ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+    ctx.fillStyle = isMine ? "#00ffcc" : "#ff007f";
+    ctx.shadowColor = isMine ? "#00ffcc" : "#ff007f";
+    ctx.shadowBlur = 10;
     ctx.fill();
     ctx.shadowBlur = 0;
   });
@@ -456,7 +478,7 @@ function drawSpaceCat(x, y, angle, skin, name, health) {
   ctx.fillStyle = "#333";
   ctx.fillRect(-20, -30, 40, 5);
   ctx.fillStyle = "#00ffcc";
-  ctx.fillRect(-20, -30, (health / 100) * 40, 5);
+  ctx.fillRect(-20, -30, (Math.max(0, health) / 100) * 40, 5);
 
   ctx.rotate(angle);
 
@@ -503,7 +525,7 @@ function updateHUD() {
   document.getElementById("hudName").innerText = userData.name;
   document.getElementById("hudCoins").innerText = `${userData.coins} 🪙`;
   document.getElementById("hudKD").innerText = `${userData.kills} / ${userData.deaths}`;
-  document.getElementById("healthBar").style.width = `${playerState.health}%`;
+  document.getElementById("healthBar").style.width = `${Math.max(0, playerState.health)}%`;
 }
 
 function updateShopUI() {
